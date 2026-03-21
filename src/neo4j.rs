@@ -101,7 +101,6 @@ async fn store_state(
     Ok(())
 }
 
-
 pub async fn retrieve_facts(
     query_str: &str,
 ) -> Result<Vec<ExtractedFact>, Box<dyn std::error::Error>> {
