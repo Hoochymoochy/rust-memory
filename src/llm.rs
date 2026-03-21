@@ -1,34 +1,7 @@
 use openai_api_rust::*;
 use openai_api_rust::chat::*;
-use serde::{Deserialize, Serialize};
-
-#[derive(Debug, Serialize, Deserialize)]
-pub enum FactType {
-    #[serde(rename = "event")]
-    Event,
-    #[serde(rename = "state")]
-    State,
-    #[serde(rename = "none")]
-    None,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct ExtractedFact {
-    pub r#type: FactType,
-    pub entity: String,
-    pub attribute: String,
-    pub value: String,
-    pub context: String,
-    pub change_reason: Option<String>,
-    pub confidence: f32,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct ExtractionResult {
-    pub facts: Vec<ExtractedFact>,
-}
-
-fn system_prompt() -> String {
+use crate::types::{ExtractionResult};
+fn system_prompt_facts() -> String {
     r#"
 You are a memory extraction assistant.
 Extract facts from the user's message and output ONLY valid JSON matching this schema:
@@ -57,6 +30,28 @@ Rules:
 "#.to_string()
 }
 
+fn system_prompt_retrieve() -> String {
+    r#"
+    You are a Neo4j Cypher expert. Generate a Cypher query that returns facts.
+    
+    Available properties on Event and State nodes:
+    - entity, attribute, value, context, change_reason, confidence, timestamp, weight
+    
+    Return results aliased as 'n' with these properties:
+    - n.entity
+    - n.attribute
+    - n.value
+    - n.context
+    - n.change_reason (may be NULL)
+    - n.confidence
+    - n.weight
+    
+    Always ORDER BY n.weight DESC and LIMIT results.
+    
+    Return ONLY the Cypher query, no explanation.
+    "#.to_string()
+}
+
 pub fn extract_facts(message: &str) -> Result<ExtractionResult, String> {
     let auth = Auth::from_env().map_err(|e| format!("Auth error: {:?}", e))?;
     let openai = OpenAI::new(auth, "https://api.openai.com/v1/");
@@ -76,7 +71,7 @@ pub fn extract_facts(message: &str) -> Result<ExtractionResult, String> {
         messages: vec![
             Message {
                 role: Role::System,    // system FIRST
-                content: system_prompt(),
+                content: system_prompt_facts(),
             },
             Message {
                 role: Role::User,      // user SECOND
@@ -100,8 +95,71 @@ pub fn extract_facts(message: &str) -> Result<ExtractionResult, String> {
     // parse into your struct
     let result: ExtractionResult = serde_json::from_str(&raw)
         .map_err(|e| format!("JSON parse error: {e}\nRaw response: {raw}"))?;
-
-    println!("Result: {result:#?}");
-
     Ok(result)
+}
+
+pub async fn generate_scheme(message: &str) -> Result<String, String> {
+    let auth = Auth::from_env().map_err(|e| format!("Auth error: {:?}", e))?;
+    let openai = OpenAI::new(auth, "https://api.openai.com/v1/");
+
+    let body = ChatBody {
+        model: "gpt-4o-mini".to_string(),
+        max_tokens: Some(1000),
+        temperature: Some(0_f32),
+        top_p: None,
+        n: Some(1),
+        stream: Some(false),
+        stop: None,
+        presence_penalty: None,
+        frequency_penalty: None,
+        logit_bias: None,
+        user: None,
+        messages: vec![
+            Message {
+                role: Role::System,
+                content: system_prompt_retrieve(),
+            },
+            Message {
+                role: Role::User,
+                content: message.to_string(),
+            },
+        ],
+    };
+
+    let rs = openai
+        .chat_completion_create(&body)
+        .map_err(|e| format!("OpenAI error: {:?}", e))?;
+
+    let mut raw = rs.choices[0]
+        .message
+        .as_ref()
+        .ok_or("No message returned")?
+        .content
+        .trim()
+        .to_string();
+
+    // Strip markdown code blocks (```cypher ... ```)
+    if raw.contains("```") {
+        // Split by ``` and get the middle part
+        let parts: Vec<&str> = raw.split("```").collect();
+        if parts.len() >= 3 {
+            raw = parts[1].to_string();
+        }
+    }
+
+    // Remove language tag (cypher, sql, etc) from first line
+    let lines: Vec<&str> = raw.lines().collect();
+    if !lines.is_empty() {
+        let first_line = lines[0].trim();
+        // If first line is just a language tag, skip it
+        if first_line == "cypher" || first_line == "sql" || first_line == "neo4j" {
+            raw = lines[1..].join("\n");
+        }
+    }
+
+    raw = raw.trim().to_string();
+
+    eprintln!("Cleaned query:\n{}", raw);
+
+    Ok(raw)
 }
