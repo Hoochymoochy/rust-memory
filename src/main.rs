@@ -80,7 +80,7 @@ async fn user_endpoint(
 
     state
         .redis
-        .add_message(&session_id, &payload.message)
+        .add_message(&payload.role, &session_id, &payload.message)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
@@ -90,7 +90,6 @@ async fn user_endpoint(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    tracing::info!("Messages: {:#?}", messages);
 
     Ok(Json(UserResponse {
         session_id,

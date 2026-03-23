@@ -31,11 +31,19 @@ pub struct ExtractionResult {
 pub struct Query {
     pub(crate) message: String,
     pub(crate) id: String,
-    pub(crate) session_id: Option<String>
+    pub(crate) session_id: Option<String>,
+    pub(crate) role: String
 }
 
 #[derive(Serialize)]
 pub struct UserResponse {
     pub session_id: String,
-    pub messages: Vec<String>,
+    pub messages: Vec<ChatMessage>
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct ChatMessage {
+    pub role: String,
+    pub message: String,
+    pub timestamp: i64
 }

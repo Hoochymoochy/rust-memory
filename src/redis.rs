@@ -1,5 +1,6 @@
 use redis::{AsyncCommands, Client};
 use tiktoken_rs::cl100k_base;
+use crate::types::ChatMessage;
 
 pub struct RedisClient {
     client: Client,
@@ -19,6 +20,7 @@ impl RedisClient {
     #[allow(dependency_on_unit_never_type_fallback)]
     pub async fn add_message(
         &self,
+        role: &str,
         session_id: &str,
         message: &str,
     ) -> redis::RedisResult<()> {
@@ -26,8 +28,21 @@ impl RedisClient {
     
         let tokens = count_tokens(message);
     
+        let msg = ChatMessage {
+            role: role.to_string(),
+            message: message.to_string(),
+            timestamp: chrono::Utc::now().timestamp(),
+        };
+    
+        let serialized = serde_json::to_string(&msg)
+            .map_err(|e| redis::RedisError::from((
+                redis::ErrorKind::TypeError,
+                "JSON serialization failed",
+                e.to_string(),
+            )))?;
+    
         // store message
-        con.rpush(&session_id, message).await?;
+        con.rpush(session_id, serialized).await?;
     
         // track token count
         let token_key = format!("{}:tokens", session_id);
@@ -39,10 +54,17 @@ impl RedisClient {
     pub async fn get_all_messages(
         &self,
         session_id: &str,
-    ) -> redis::RedisResult<Vec<String>> {
+    ) -> redis::RedisResult<Vec<ChatMessage>> {
         let mut con = self.client.get_multiplexed_async_connection().await?;
-        
-        con.lrange(session_id, 0, -1).await
+    
+        let messages: Vec<String> = con.lrange(session_id, 0, -1).await?;
+    
+        let parsed: Vec<ChatMessage> = messages
+            .into_iter()
+            .filter_map(|msg| serde_json::from_str(&msg).ok())
+            .collect();
+    
+        Ok(parsed)
     }
 }
 fn count_tokens(text: &str) -> usize {
