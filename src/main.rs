@@ -80,13 +80,13 @@ async fn user_endpoint(
 
     state
         .redis
-        .add_message(session_id.clone(), &payload.message)
+        .add_message(&session_id, &payload.message)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     let messages = state
         .redis
-        .get_all_messages(session_id.clone())
+        .get_all_messages(&session_id)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
