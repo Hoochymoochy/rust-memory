@@ -12,15 +12,19 @@ mod llm;
 mod neo4j;
 mod types;
 mod redis;
+mod runners;
 use uuid::Uuid;
 
 use crate::types::{Query, UserResponse};
+use neo4j::Neo4jClient;
 
 use std::sync::Arc;
+use axum::extract::State;
 
 struct AppState {
     redis: Arc<redis::RedisClient>,
 }
+
 
 #[tokio::main]
 async fn main() {
@@ -28,9 +32,14 @@ async fn main() {
         .await
         .expect("Failed to connect to Redis");
 
-    let state = Arc::new(AppState {
+    let neo4j_client = neo4j::Neo4jClient::new()
+        .await
+        .expect("Failed to connect to Neo4j");
+
+    let state: Arc<AppState> = Arc::new(AppState {
         redis: Arc::new(redis_client),
     });
+
     dotenvy::dotenv().ok();
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::INFO)
@@ -55,13 +64,34 @@ async fn main() {
     axum::serve(listener, app)
         .await
         .expect("Server error");
+
+    let runner = Arc::new(runners::new(redis_client, neo4j_client.clone()));
+
+
+    // ===== BACKGROUND TASK 1: Archive Monitor =====
+    tokio::spawn({
+        let runner = runner.clone();
+        async move {
+            if let Err(e) = runner.run_archive_monitor().await {
+                tracing::error!("Archive monitor crashed: {}", e);
+            }
+        }
+    });
+
+    // ===== BACKGROUND TASK 2: Buffer Migration =====
+    tokio::spawn({
+        let runner = runner.clone();
+        async move {
+            if let Err(e) = runner.run_buffer_migration().await {
+                tracing::error!("Buffer migration crashed: {}", e);
+            }
+        }
+    });
 }
 
 async fn health_check() -> &'static str {
     "OK"
 }
-
-use axum::extract::State;
 
 async fn user_endpoint(
     State(state): State<Arc<AppState>>,

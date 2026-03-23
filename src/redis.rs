@@ -2,6 +2,7 @@ use redis::{AsyncCommands, Client};
 use tiktoken_rs::cl100k_base;
 use crate::types::ChatMessage;
 
+
 pub struct RedisClient {
     client: Client,
 }
@@ -65,6 +66,12 @@ impl RedisClient {
             .collect();
     
         Ok(parsed)
+    }
+
+    pub async fn get_token_count(&self, session_id: &str) -> redis::RedisResult<i64> {
+        let mut con = self.client.get_multiplexed_async_connection().await?;
+        let token_key = format!("{}:tokens", session_id);
+        con.get(token_key).await
     }
 }
 fn count_tokens(text: &str) -> usize {
