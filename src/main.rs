@@ -5,15 +5,32 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
+
 use tracing_subscriber;
 
 mod llm;
 mod neo4j;
 mod types;
-use crate::types::{Query, ExtractionResult, ExtractedFact};
+mod redis;
+use uuid::Uuid;
+
+use crate::types::{Query, UserResponse};
+
+use std::sync::Arc;
+
+struct AppState {
+    redis: Arc<redis::RedisClient>,
+}
 
 #[tokio::main]
 async fn main() {
+    let redis_client = redis::RedisClient::new()
+        .await
+        .expect("Failed to connect to Redis");
+
+    let state = Arc::new(AppState {
+        redis: Arc::new(redis_client),
+    });
     dotenvy::dotenv().ok();
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::INFO)
@@ -21,8 +38,13 @@ async fn main() {
 
     let app = Router::new()
         .route("/health", get(health_check))
-        .route("/memory", post(memory_extractor))
-        .route("/query", post(memory_retrieval));
+        // user endpoints
+        .route("/user", get(user_endpoint))
+        .route("/user", post(user_endpoint))
+        // memory endpoints
+        .route("/memory", post(agent_endpoint))
+        .route("/memory", get(agent_endpoint))
+        .with_state(state);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:3000")
         .await
@@ -39,72 +61,53 @@ async fn health_check() -> &'static str {
     "OK"
 }
 
-async fn memory_extractor(
+use axum::extract::State;
+
+async fn user_endpoint(
+    State(state): State<Arc<AppState>>,
     Json(payload): Json<Query>,
-) -> Result<Json<ExtractionResult>, ApiError> {
-    tracing::info!("Extracting facts from message: {}", &payload.message[..50.min(payload.message.len())]);
-    
-    let result = llm::extract_facts(&payload.message)
-        .map_err(|e| ApiError::LlmError(e))?;
-    
-    let fact_count = result.facts.len();
-    
-    neo4j::store_data(result.clone())
-        .await
-        .map_err(|e| ApiError::DatabaseError(e.to_string()))?;
-    
-    tracing::info!("Successfully stored {} facts", fact_count);
-    Ok(Json(result))
-}
-
-async fn memory_retrieval(
-    Json(payload): Json<Query>,
-) -> Result<Json<Vec<ExtractedFact>>, ApiError> {
-    tracing::info!("Generating query for message: {}", &payload.message[..50.min(payload.message.len())]);
-    
-    let query_str = llm::generate_scheme(&payload.message)
-        .await
-        .map_err(|e| ApiError::LlmError(e))?;
-    
-    tracing::debug!("Generated query: {}", query_str);
-    
-    let facts = neo4j::retrieve_facts(&query_str)
-        .await
-        .map_err(|e| ApiError::DatabaseError(e.to_string()))?;
-    
-    tracing::info!("Retrieved {} facts", facts.len());
-    Ok(Json(facts))
-}
-
-/// Custom error type for API responses
-pub enum ApiError {
-    LlmError(String),
-    DatabaseError(String),
-    ValidationError(String),
-}
-
-impl IntoResponse for ApiError {
-    fn into_response(self) -> Response {
-        let (status, error_message) = match self {
-            ApiError::LlmError(msg) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("LLM Error: {}", msg),
-            ),
-            ApiError::DatabaseError(msg) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Database Error: {}", msg),
-            ),
-            ApiError::ValidationError(msg) => (
-                StatusCode::BAD_REQUEST,
-                format!("Validation Error: {}", msg),
-            ),
-        };
-
-        let body = serde_json::json!({
-            "error": error_message,
-            "status": status.as_u16(),
-        });
-
-        (status, Json(body)).into_response()
+) -> Result<Json<UserResponse>, (StatusCode, String)> {
+    if payload.id.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "please provide a user id".to_string(),
+        ));
     }
+
+    let session_id = payload
+        .session_id
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
+
+    state
+        .redis
+        .add_message(session_id.clone(), &payload.message)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let messages = state
+        .redis
+        .get_all_messages(session_id.clone())
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    tracing::info!("Messages: {:#?}", messages);
+
+    Ok(Json(UserResponse {
+        session_id,
+        messages,
+    }))
+}
+
+// Stub implementations for your other handlers
+async fn memory_extractor(
+    State(_state): State<Arc<AppState>>,
+) -> Result<String, (StatusCode, String)> {
+    Ok("GET /memory endpoint".to_string())
+}
+
+async fn agent_endpoint(
+    State(_state): State<Arc<AppState>>,
+    Json(_payload): Json<Query>,
+) -> Result<String, (StatusCode, String)> {
+    Ok("Agent response".to_string())
 }
